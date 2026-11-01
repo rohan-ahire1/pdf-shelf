@@ -1,34 +1,23 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { getClientId, loadGis, restoreToken, saveClientId, signIn, signOut } from './auth';
-import {
-  AuthError,
-  findRoot,
-  loadLibrary,
-  setRoot,
-  trashPdf,
-  updatePdf,
-  uploadPdf,
-  type Folder,
-  type Pdf,
-  type PdfChanges,
-} from './drive';
+import { ACCEPTED, isAccepted, listNotes, trashNote, updateNote, uploadFile, type Note, type NoteChanges } from './api';
 import { Detail } from './components/Detail';
-import { FolderPicker } from './components/FolderPicker';
 import { Importance } from './components/Importance';
 import { Tag } from './components/Tag';
+import { setTheme, useTheme } from './theme';
 
-type Phase = 'setup' | 'signedOut' | 'loading' | 'pickFolder' | 'ready';
 type View =
   | { kind: 'all' }
   | { kind: 'starred' }
   | { kind: 'important' }
   | { kind: 'unsorted' }
+  | { kind: 'folder'; value: string }
   | { kind: 'type'; value: string }
   | { kind: 'tag'; value: string };
 type Sort = 'importance' | 'modified' | 'created' | 'name';
 
 const DEFAULT_TYPES = ['Study', 'Work', 'Research', 'Personal', 'Reference'];
-const SORT_KEY = 'pdfShelf.sort';
+const SORT_KEY = 'notes.sort';
+const KIND_LABEL: Record<Note['kind'], string> = { pdf: 'PDF', markdown: 'MD', html: 'HTML', text: 'TXT' };
 
 const sameView = (a: View, b: View) => a.kind === b.kind && ('value' in a ? a.value : '') === ('value' in b ? b.value : '');
 
@@ -43,8 +32,8 @@ function readSort(): Sort {
 }
 
 // The original values of just the fields being changed, so a failed save only undoes itself.
-function pick(pdf: Pdf, changes: PdfChanges): PdfChanges {
-  return Object.fromEntries(Object.keys(changes).map((k) => [k, pdf[k as keyof PdfChanges]]));
+function pick(note: Note, changes: NoteChanges): NoteChanges {
+  return Object.fromEntries(Object.keys(changes).map((k) => [k, note[k as keyof NoteChanges]]));
 }
 
 function formatDate(iso: string) {
@@ -54,23 +43,24 @@ function formatDate(iso: string) {
   return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', ...(sameYear ? {} : { year: 'numeric' }) });
 }
 
+const displayName = (name: string) => name.replace(/\.(pdf|md|markdown|html?|txt)$/i, '');
+
 export default function App() {
-  const [phase, setPhase] = useState<Phase>(getClientId() ? 'signedOut' : 'setup');
-  const [root, setRootState] = useState<Folder | null>(null);
-  const [pdfs, setPdfs] = useState<Pdf[]>([]);
+  const [notes, setNotes] = useState<Note[] | null>(null);
+  const [loadError, setLoadError] = useState('');
   const [view, setView] = useState<View>({ kind: 'all' });
   const [sort, setSort] = useState<Sort>(readSort);
   const [query, setQuery] = useState('');
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selected, setSelected] = useState<string | null>(null);
   const [toast, setToast] = useState<{ text: string; error?: boolean } | null>(null);
-  const [authMessage, setAuthMessage] = useState('');
   const [dragging, setDragging] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const theme = useTheme();
   const searchRef = useRef<HTMLInputElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const toastTimer = useRef<number>();
-  const pdfsRef = useRef(pdfs);
-  pdfsRef.current = pdfs;
+  const notesRef = useRef(notes);
+  notesRef.current = notes;
 
   const notify = useCallback((text: string, error = false) => {
     setToast({ text, error });
@@ -78,50 +68,33 @@ export default function App() {
     toastTimer.current = window.setTimeout(() => setToast(null), error ? 6000 : 3000);
   }, []);
 
-  const handleError = useCallback(
-    (e: unknown) => {
-      if (e instanceof AuthError) {
-        setAuthMessage(e.message);
-        setPhase('signedOut');
-        return;
-      }
-      notify(e instanceof Error ? e.message : String(e), true);
-    },
-    [notify],
-  );
+  const showError = useCallback((e: unknown) => notify(e instanceof Error ? e.message : String(e), true), [notify]);
 
-  const openLibrary = useCallback(
-    async (folder: Folder) => {
-      setRootState(folder);
-      setPhase('loading');
-      setPdfs(await loadLibrary(folder));
-      setPhase('ready');
-    },
-    [],
-  );
-
-  const boot = useCallback(async () => {
-    setPhase('loading');
+  const refresh = useCallback(async () => {
+    setRefreshing(true);
     try {
-      const found = await findRoot();
-      if (found) await openLibrary(found);
-      else setPhase('pickFolder');
+      setNotes(await listNotes());
+      setLoadError('');
     } catch (e) {
-      handleError(e);
-      if (!(e instanceof AuthError)) setPhase('signedOut');
+      if (!notesRef.current) setLoadError(e instanceof Error ? e.message : String(e));
+      else showError(e);
+    } finally {
+      setRefreshing(false);
     }
-  }, [openLibrary, handleError]);
+  }, [showError]);
 
+  // Load now, and again whenever you come back to the tab, so files copied in from elsewhere show up.
   useEffect(() => {
-    if (!getClientId()) return;
-    loadGis().catch(() => {});
-    if (restoreToken()) boot();
-  }, [boot]);
+    refresh();
+    const onVisible = () => document.visibilityState === 'visible' && refresh();
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+  }, [refresh]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement;
-      if (e.key === '/' && !['INPUT', 'TEXTAREA'].includes(target.tagName)) {
+      if (e.key === '/' && !['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName)) {
         e.preventDefault();
         searchRef.current?.focus();
       }
@@ -130,70 +103,53 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKey);
   }, []);
 
-  const doSignIn = async () => {
-    setAuthMessage('');
-    try {
-      await signIn();
-      await boot();
-    } catch (e) {
-      setAuthMessage(e instanceof Error ? e.message : String(e));
-    }
-  };
-
   const patch = useCallback(
-    async (id: string, changes: PdfChanges) => {
-      const before = pdfsRef.current.find((p) => p.id === id);
+    async (path: string, changes: NoteChanges) => {
+      const before = notesRef.current?.find((n) => n.path === path);
       if (!before) return;
-      setPdfs((ps) => ps.map((p) => (p.id === id ? { ...p, ...changes } : p)));
+      setNotes((ns) => ns && ns.map((n) => (n.path === path ? { ...n, ...changes } : n)));
       try {
-        await updatePdf(id, changes);
+        const { path: newPath } = await updateNote(path, changes);
+        if (newPath !== path) {
+          setNotes((ns) => ns && ns.map((n) => (n.path === path ? { ...n, path: newPath } : n)));
+          setSelected((s) => (s === path ? newPath : s));
+        }
       } catch (e) {
-        setPdfs((ps) => ps.map((p) => (p.id === id ? { ...p, ...pick(before, changes) } : p)));
-        handleError(e);
+        setNotes((ns) => ns && ns.map((n) => (n.path === path ? { ...n, ...pick(before, changes) } : n)));
+        showError(e);
       }
     },
-    [handleError],
+    [showError],
   );
 
-  const trash = async (pdf: Pdf) => {
+  const trash = async (note: Note) => {
     try {
-      await trashPdf(pdf.id);
-      setPdfs((ps) => ps.filter((p) => p.id !== pdf.id));
-      setSelectedId(null);
-      notify(`Moved "${pdf.name}" to Drive trash`);
+      await trashNote(note.path);
+      setNotes((ns) => ns && ns.filter((n) => n.path !== note.path));
+      setSelected(null);
+      notify(`Moved "${note.name}" to trash`);
     } catch (e) {
-      handleError(e);
+      showError(e);
     }
   };
 
   const upload = async (files: FileList | File[]) => {
-    if (!root) return;
-    const list = [...files].filter((f) => f.type === 'application/pdf' || f.name.toLowerCase().endsWith('.pdf'));
-    if (!list.length) return notify('Only PDF files can be added.', true);
-    notify(`Uploading ${list.length} PDF${list.length > 1 ? 's' : ''}…`);
+    const list = [...files].filter((f) => isAccepted(f.name));
+    if (!list.length) return notify('Only PDF, Markdown, HTML and text files can be added.', true);
+    const folder = view.kind === 'folder' ? view.value : '';
+    notify(`Uploading ${list.length} file${list.length > 1 ? 's' : ''}…`);
     let done = 0;
     for (const file of list) {
       try {
-        const pdf = await uploadPdf(file, root);
-        setPdfs((ps) => [pdf, ...ps]);
+        await uploadFile(file, folder);
         done++;
       } catch (e) {
-        handleError(e);
-        if (e instanceof AuthError) return;
+        showError(e);
       }
     }
-    if (done) notify(`Added ${done} PDF${done > 1 ? 's' : ''} to ${root.name}`);
-  };
-
-  const refresh = async () => {
-    if (!root) return;
-    setRefreshing(true);
-    try {
-      setPdfs(await loadLibrary(root));
-    } catch (e) {
-      handleError(e);
-    } finally {
-      setRefreshing(false);
+    if (done) {
+      await refresh();
+      notify(`Added ${done} file${done > 1 ? 's' : ''}`);
     }
   };
 
@@ -206,26 +162,31 @@ export default function App() {
     }
   };
 
-  const { tagCounts, typeCounts, counts } = useMemo(() => {
-    const tagCounts = new Map<string, number>();
-    const typeCounts = new Map<string, number>();
+  const all = useMemo(() => notes ?? [], [notes]);
+
+  const { tagCounts, typeCounts, folderCounts, counts } = useMemo(() => {
+    const tags = new Map<string, number>();
+    const types = new Map<string, number>();
+    const folders = new Map<string, number>();
     let starred = 0;
     let important = 0;
     let unsorted = 0;
-    for (const p of pdfs) {
-      for (const t of p.tags) tagCounts.set(t, (tagCounts.get(t) ?? 0) + 1);
-      if (p.type) typeCounts.set(p.type, (typeCounts.get(p.type) ?? 0) + 1);
-      if (p.starred) starred++;
-      if (p.importance >= 4) important++;
-      if (!p.type && !p.tags.length) unsorted++;
+    for (const n of all) {
+      for (const t of n.tags) tags.set(t, (tags.get(t) ?? 0) + 1);
+      if (n.type) types.set(n.type, (types.get(n.type) ?? 0) + 1);
+      if (n.folder) folders.set(n.folder, (folders.get(n.folder) ?? 0) + 1);
+      if (n.starred) starred++;
+      if (n.importance >= 4) important++;
+      if (!n.type && !n.tags.length) unsorted++;
     }
     const byName = (a: [string, number], b: [string, number]) => a[0].localeCompare(b[0]);
     return {
-      tagCounts: [...tagCounts].sort(byName),
-      typeCounts: [...typeCounts].sort(byName),
-      counts: { all: pdfs.length, starred, important, unsorted },
+      tagCounts: [...tags].sort(byName),
+      typeCounts: [...types].sort(byName),
+      folderCounts: [...folders].sort(byName),
+      counts: { all: all.length, starred, important, unsorted },
     };
-  }, [pdfs]);
+  }, [all]);
 
   const allTags = useMemo(() => tagCounts.map(([t]) => t), [tagCounts]);
   const allTypes = useMemo(
@@ -235,110 +196,87 @@ export default function App() {
 
   const visible = useMemo(() => {
     const q = query.trim().toLowerCase();
-    const list = pdfs.filter((p) => {
+    const list = all.filter((n) => {
       switch (view.kind) {
         case 'starred':
-          if (!p.starred) return false;
+          if (!n.starred) return false;
           break;
         case 'important':
-          if (p.importance < 4) return false;
+          if (n.importance < 4) return false;
           break;
         case 'unsorted':
-          if (p.type || p.tags.length) return false;
+          if (n.type || n.tags.length) return false;
+          break;
+        case 'folder':
+          if (n.folder !== view.value) return false;
           break;
         case 'type':
-          if (p.type !== view.value) return false;
+          if (n.type !== view.value) return false;
           break;
         case 'tag':
-          if (!p.tags.includes(view.value)) return false;
+          if (!n.tags.includes(view.value)) return false;
           break;
       }
       if (!q) return true;
-      return [p.name, p.type, p.folderPath, ...p.tags].some((s) => s.toLowerCase().includes(q));
+      return [n.name, n.type, n.folder, ...n.tags].some((s) => s.toLowerCase().includes(q));
     });
-    const byModified = (a: Pdf, b: Pdf) => b.modifiedTime.localeCompare(a.modifiedTime);
-    const compare: Record<Sort, (a: Pdf, b: Pdf) => number> = {
+    const byModified = (a: Note, b: Note) => b.modifiedTime.localeCompare(a.modifiedTime);
+    const compare: Record<Sort, (a: Note, b: Note) => number> = {
       importance: (a, b) => b.importance - a.importance || Number(b.starred) - Number(a.starred) || byModified(a, b),
       modified: byModified,
       created: (a, b) => b.createdTime.localeCompare(a.createdTime),
       name: (a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }),
     };
     return list.sort(compare[sort]);
-  }, [pdfs, view, query, sort]);
+  }, [all, view, query, sort]);
 
-  const selected = pdfs.find((p) => p.id === selectedId) ?? null;
+  const current = all.find((n) => n.path === selected) ?? null;
 
-  if (phase === 'setup') return <Setup onSaved={() => setPhase('signedOut')} />;
-
-  if (phase === 'signedOut') {
+  if (!notes) {
     return (
       <div className="center-page">
-        <div className="card signin">
-          <div className="logo" aria-hidden>
-            ▤
+        {loadError ? (
+          <div className="card">
+            <h1>Can't reach your notes</h1>
+            <p className="error-text">{loadError}</p>
+            <button className="btn primary" onClick={refresh}>
+              Try again
+            </button>
           </div>
-          <h1>PDF Shelf</h1>
-          <p className="muted">Star, tag and rank the PDF notes in your Google Drive.</p>
-          <button className="btn primary big" onClick={doSignIn}>
-            Sign in with Google
-          </button>
-          {authMessage && <p className="error-text">{authMessage}</p>}
-        </div>
+        ) : (
+          <p className="muted">Loading your notes…</p>
+        )}
       </div>
-    );
-  }
-
-  if (phase === 'loading') {
-    return (
-      <div className="center-page">
-        <p className="muted">Loading your PDFs{root ? ` from ${root.name}` : ''}…</p>
-      </div>
-    );
-  }
-
-  if (phase === 'pickFolder') {
-    return (
-      <>
-        <FolderPicker
-          current={root}
-          onError={handleError}
-          onCancel={root ? () => setPhase('ready') : undefined}
-          onPick={async (folder) => {
-            await setRoot(folder, root);
-            setView({ kind: 'all' });
-            setSelectedId(null);
-            await openLibrary(folder);
-          }}
-        />
-        {toast && <div className={`toast ${toast.error ? 'error' : ''}`}>{toast.text}</div>}
-      </>
     );
   }
 
   const navItem = (v: View, label: string, count: number, icon?: string) => (
-    <li key={label}>
-      <button type="button" className={sameView(view, v) ? 'active' : ''} onClick={() => setView(v)}>
-        {icon && <span className="nav-icon" aria-hidden>{icon}</span>}
+    <li key={`${v.kind}:${label}`}>
+      <button type="button" className={sameView(view, v) ? 'active' : ''} onClick={() => setView(v)} title={label}>
+        {icon && (
+          <span className="nav-icon" aria-hidden>
+            {icon}
+          </span>
+        )}
         <span className="nav-label">{label}</span>
         <span className="count">{count}</span>
       </button>
     </li>
   );
 
-  const viewTitle =
-    view.kind === 'all'
-      ? 'All PDFs'
-      : view.kind === 'starred'
-        ? 'Starred'
-        : view.kind === 'important'
-          ? 'Most important'
-          : view.kind === 'unsorted'
-            ? 'Unsorted'
-            : view.value;
+  const viewTitle: Record<View['kind'], string> = {
+    all: 'All notes',
+    starred: 'Starred',
+    important: 'Most important',
+    unsorted: 'Unsorted',
+    folder: '',
+    type: '',
+    tag: '',
+  };
 
   return (
     <div
-      className={`app ${selected ? 'with-detail' : ''}`}
+      className={`app ${current ? 'with-detail' : ''}`}
       onDragOver={(e) => {
         if (e.dataTransfer.types.includes('Files')) {
           e.preventDefault();
@@ -346,7 +284,7 @@ export default function App() {
         }
       }}
       onDragLeave={(e) => {
-        if (e.currentTarget === e.target || !e.relatedTarget) setDragging(false);
+        if (!e.relatedTarget) setDragging(false);
       }}
       onDrop={(e) => {
         e.preventDefault();
@@ -359,7 +297,7 @@ export default function App() {
           <span className="logo small" aria-hidden>
             ▤
           </span>
-          <span>PDF Shelf</span>
+          <span>Notes</span>
         </div>
         <input
           ref={searchRef}
@@ -368,16 +306,25 @@ export default function App() {
           placeholder="Search names, tags, types   /"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          aria-label="Search PDFs"
+          aria-label="Search notes"
         />
         <div className="topbar-actions">
+          <button
+            type="button"
+            className="btn ghost icon"
+            onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
+            aria-label={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+            title={theme === 'dark' ? 'Light mode' : 'Dark mode'}
+          >
+            {theme === 'dark' ? '☀' : '☾'}
+          </button>
           <button className="btn primary" onClick={() => fileRef.current?.click()}>
-            + Add PDFs
+            + Add files
           </button>
           <input
             ref={fileRef}
             type="file"
-            accept="application/pdf,.pdf"
+            accept={ACCEPTED}
             multiple
             hidden
             onChange={(e) => {
@@ -385,35 +332,22 @@ export default function App() {
               e.target.value = '';
             }}
           />
-          <button
-            className="btn ghost"
-            onClick={() => {
-              signOut();
-              setPdfs([]);
-              setRootState(null);
-              setSelectedId(null);
-              setPhase('signedOut');
-            }}
-          >
-            Sign out
-          </button>
         </div>
       </header>
 
       <nav className="sidebar" aria-label="Filters">
-        <div className="folder-chip">
-          <span className="muted">Folder</span>
-          <strong title={root?.name}>{root?.name}</strong>
-          <button type="button" className="link" onClick={() => setPhase('pickFolder')}>
-            Change
-          </button>
-        </div>
         <ul>
-          {navItem({ kind: 'all' }, 'All PDFs', counts.all, '▤')}
+          {navItem({ kind: 'all' }, 'All notes', counts.all, '▤')}
           {navItem({ kind: 'starred' }, 'Starred', counts.starred, '★')}
           {navItem({ kind: 'important' }, 'Most important', counts.important, '▲')}
           {navItem({ kind: 'unsorted' }, 'Unsorted', counts.unsorted, '○')}
         </ul>
+        {folderCounts.length > 0 && (
+          <>
+            <h2>Folders</h2>
+            <ul>{folderCounts.map(([f, n]) => navItem({ kind: 'folder', value: f }, f, n, '📁'))}</ul>
+          </>
+        )}
         {typeCounts.length > 0 && (
           <>
             <h2>Type of work</h2>
@@ -431,7 +365,7 @@ export default function App() {
       <main className="main">
         <div className="toolbar">
           <h1>
-            {viewTitle} <span className="muted">{visible.length}</span>
+            {'value' in view ? view.value : viewTitle[view.kind]} <span className="muted">{visible.length}</span>
           </h1>
           <div className="toolbar-right">
             <label className="sort">
@@ -451,12 +385,12 @@ export default function App() {
 
         {visible.length === 0 ? (
           <div className="empty">
-            {pdfs.length === 0 ? (
+            {all.length === 0 ? (
               <>
                 <p>
-                  <strong>No PDFs in {root?.name} yet.</strong>
+                  <strong>No notes yet.</strong>
                 </p>
-                <p className="muted">Drop PDFs anywhere on this page, or use “Add PDFs”. You can also save PDFs into this folder from Google Drive.</p>
+                <p className="muted">Drop PDFs, Markdown or HTML files anywhere on this page, or use “Add files”.</p>
               </>
             ) : (
               <p className="muted">Nothing matches. Try another filter or search.</p>
@@ -464,50 +398,53 @@ export default function App() {
           </div>
         ) : (
           <ul className="pdf-list">
-            {visible.map((p) => (
-              <li key={p.id} className={p.id === selectedId ? 'selected' : ''}>
+            {visible.map((n) => (
+              <li key={n.path} className={n.path === selected ? 'selected' : ''}>
                 <button
                   type="button"
-                  className={`star ${p.starred ? 'on' : ''}`}
-                  aria-pressed={p.starred}
-                  aria-label={p.starred ? `Unstar ${p.name}` : `Star ${p.name}`}
-                  onClick={() => patch(p.id, { starred: !p.starred })}
+                  className={`star ${n.starred ? 'on' : ''}`}
+                  aria-pressed={n.starred}
+                  aria-label={n.starred ? `Unstar ${n.name}` : `Star ${n.name}`}
+                  onClick={() => patch(n.path, { starred: !n.starred })}
                 >
                   ★
                 </button>
-                <button type="button" className="pdf-main" onClick={() => setSelectedId(p.id)}>
-                  <span className="pdf-name">{p.name.replace(/\.pdf$/i, '')}</span>
+                <button type="button" className="pdf-main" onClick={() => setSelected(n.path)}>
+                  <span className="pdf-name">
+                    <span className={`kind kind-${n.kind}`}>{KIND_LABEL[n.kind]}</span>
+                    {displayName(n.name)}
+                  </span>
                   <span className="pdf-meta">
-                    {p.type && <span className="type">{p.type}</span>}
-                    {p.tags.map((t) => (
+                    {n.type && <span className="type">{n.type}</span>}
+                    {n.tags.map((t) => (
                       <Tag key={t} name={t} />
                     ))}
-                    {p.folderPath && <span className="muted path">{p.folderPath}</span>}
+                    {n.folder && view.kind !== 'folder' && <span className="muted path">{n.folder}</span>}
                   </span>
                 </button>
-                <Importance value={p.importance} onChange={(importance) => patch(p.id, { importance })} />
-                <span className="date muted">{formatDate(p.modifiedTime)}</span>
+                <Importance value={n.importance} onChange={(importance) => patch(n.path, { importance })} />
+                <span className="date muted">{formatDate(n.modifiedTime)}</span>
               </li>
             ))}
           </ul>
         )}
       </main>
 
-      {selected && (
+      {current && (
         <Detail
-          key={selected.id}
-          pdf={selected}
+          key={current.path}
+          note={current}
           allTags={allTags}
           allTypes={allTypes}
-          onPatch={(changes) => patch(selected.id, changes)}
-          onTrash={() => trash(selected)}
-          onClose={() => setSelectedId(null)}
+          onPatch={(changes) => patch(current.path, changes)}
+          onTrash={() => trash(current)}
+          onClose={() => setSelected(null)}
         />
       )}
 
       {dragging && (
         <div className="dropzone" aria-hidden>
-          Drop PDFs to add them to {root?.name}
+          Drop files to add them{view.kind === 'folder' ? ` to ${view.value}` : ''}
         </div>
       )}
       {toast && (
@@ -515,39 +452,6 @@ export default function App() {
           {toast.text}
         </div>
       )}
-    </div>
-  );
-}
-
-function Setup({ onSaved }: { onSaved: () => void }) {
-  const [id, setId] = useState('');
-  return (
-    <div className="center-page">
-      <form
-        className="card"
-        onSubmit={(e) => {
-          e.preventDefault();
-          if (!id.trim().endsWith('.apps.googleusercontent.com')) return;
-          saveClientId(id);
-          onSaved();
-        }}
-      >
-        <h1>One-time setup</h1>
-        <p className="muted">
-          Paste the Google OAuth Client ID you made for PDF Shelf (see the README). It is saved in this browser only.
-        </p>
-        <input
-          value={id}
-          onChange={(e) => setId(e.target.value)}
-          placeholder="1234-abc.apps.googleusercontent.com"
-          aria-label="Google OAuth Client ID"
-          autoFocus
-        />
-        {id && !id.trim().endsWith('.apps.googleusercontent.com') && (
-          <p className="error-text">That doesn’t look like a Client ID. It ends in .apps.googleusercontent.com</p>
-        )}
-        <button className="btn primary big">Save</button>
-      </form>
     </div>
   );
 }

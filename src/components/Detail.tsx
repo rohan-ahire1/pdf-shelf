@@ -1,24 +1,31 @@
 import { useEffect, useId, useState } from 'react';
-import { previewUrl, type Pdf, type PdfChanges } from '../drive';
+import { rawUrl, type Note, type NoteChanges } from '../api';
 import { Importance } from './Importance';
 import { TagEditor } from './TagEditor';
+import { Viewer } from './Viewer';
 
 interface Props {
-  pdf: Pdf;
+  note: Note;
   allTags: string[];
   allTypes: string[];
-  onPatch: (changes: PdfChanges) => void;
+  onPatch: (changes: NoteChanges) => void;
   onTrash: () => void;
   onClose: () => void;
 }
 
-export function Detail({ pdf, allTags, allTypes, onPatch, onTrash, onClose }: Props) {
-  const [name, setName] = useState(pdf.name);
-  const [type, setType] = useState(pdf.type);
+const splitExt = (name: string) => {
+  const i = name.lastIndexOf('.');
+  return i > 0 ? [name.slice(0, i), name.slice(i)] : [name, ''];
+};
+
+export function Detail({ note, allTags, allTypes, onPatch, onTrash, onClose }: Props) {
+  const [base, ext] = splitExt(note.name);
+  const [name, setName] = useState(base);
+  const [type, setType] = useState(note.type);
   const typesId = useId();
 
-  useEffect(() => setName(pdf.name), [pdf.id, pdf.name]);
-  useEffect(() => setType(pdf.type), [pdf.id, pdf.type]);
+  useEffect(() => setName(splitExt(note.name)[0]), [note.name]);
+  useEffect(() => setType(note.type), [note.path, note.type]);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === 'Escape' && onClose();
     window.addEventListener('keydown', onKey);
@@ -27,23 +34,23 @@ export function Detail({ pdf, allTags, allTypes, onPatch, onTrash, onClose }: Pr
 
   const commitName = () => {
     const v = name.trim();
-    if (v && v !== pdf.name) onPatch({ name: v });
-    else setName(pdf.name);
+    if (v && v !== base) onPatch({ name: v + ext });
+    else setName(base);
   };
   const commitType = () => {
     const v = type.trim();
-    if (v !== pdf.type) onPatch({ type: v });
+    if (v !== note.type) onPatch({ type: v });
   };
 
   return (
-    <aside className="detail" aria-label="PDF details">
+    <aside className="detail" aria-label="Note details">
       <div className="detail-head">
         <button
           type="button"
-          className={`star ${pdf.starred ? 'on' : ''}`}
-          aria-pressed={pdf.starred}
-          aria-label={pdf.starred ? 'Unstar' : 'Star'}
-          onClick={() => onPatch({ starred: !pdf.starred })}
+          className={`star ${note.starred ? 'on' : ''}`}
+          aria-pressed={note.starred}
+          aria-label={note.starred ? 'Unstar' : 'Star'}
+          onClick={() => onPatch({ starred: !note.starred })}
         >
           ★
         </button>
@@ -62,7 +69,7 @@ export function Detail({ pdf, allTags, allTypes, onPatch, onTrash, onClose }: Pr
 
       <div className="fields">
         <label>Importance</label>
-        <Importance size="md" value={pdf.importance} onChange={(importance) => onPatch({ importance })} />
+        <Importance size="md" value={note.importance} onChange={(importance) => onPatch({ importance })} />
 
         <label htmlFor={`${typesId}-input`}>Type of work</label>
         <div>
@@ -83,27 +90,32 @@ export function Detail({ pdf, allTags, allTypes, onPatch, onTrash, onClose }: Pr
         </div>
 
         <label>Tags</label>
-        <TagEditor tags={pdf.tags} suggestions={allTags} onChange={(tags) => onPatch({ tags })} />
+        <TagEditor tags={note.tags} suggestions={allTags} onChange={(tags) => onPatch({ tags })} />
 
-        {pdf.folderPath && (
+        {note.folder && (
           <>
-            <label>Subfolder</label>
-            <div className="muted">{pdf.folderPath}</div>
+            <label>Folder</label>
+            <div className="muted">{note.folder}</div>
           </>
         )}
       </div>
 
-      <iframe className="preview" src={previewUrl(pdf.id)} title={`Preview of ${pdf.name}`} allow="autoplay" />
+      <Viewer note={note} />
 
       <div className="detail-actions">
-        <a className="btn" href={pdf.webViewLink} target="_blank" rel="noreferrer">
-          Open in Google Drive
-        </a>
+        <div className="row">
+          <a className="btn" href={rawUrl(note.path)} target="_blank" rel="noreferrer">
+            Open in new tab
+          </a>
+          <a className="btn ghost" href={`${rawUrl(note.path)}?download`}>
+            Download
+          </a>
+        </div>
         <button
           type="button"
           className="btn danger"
           onClick={() => {
-            if (confirm(`Move "${pdf.name}" to Google Drive trash? You can restore it from Drive for 30 days.`)) onTrash();
+            if (confirm(`Move "${note.name}" to trash? It stays in ~/notes/.trash on the server until you empty it.`)) onTrash();
           }}
         >
           Move to trash
