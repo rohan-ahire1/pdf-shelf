@@ -1,45 +1,31 @@
-# PDF Shelf
+# Notes
 
-A small web app over Google Drive for organising PDF notes: star them, tag them, give each a type of work and an importance (1–5), then filter, search and sort.
+Source for the web app I use to read and organize my own notes: PDFs, Markdown with Mermaid diagrams, HTML and text files. Star them, tag them, set a type of work, rank them by importance, and read them in the browser.
 
-- It only looks at **one Drive folder** you pick (and its subfolders). Files are never moved.
-- **Stars** are Drive's own stars. **Tags, type and importance** are saved on each file in Drive, so they show up on any device you sign in from.
-- Drop PDFs from your computer onto the page to upload them into the folder.
-- No server and no database: the site is static and talks to Google Drive straight from your browser.
+It runs on my server behind a login, so there is no public demo. The [notes](https://github.com/rohan-ahire1/notes) repo has a screenshot and more about how the server works, and it holds the built app.
 
-## One-time Google setup (about 5 minutes)
+This repo started as PDF Shelf, a static app on the Google Drive API. The old version is in the git history.
 
-1. Go to <https://console.cloud.google.com/>, create a project (e.g. "PDF Shelf").
-2. **APIs & Services → Library** → enable **Google Drive API**.
-3. **APIs & Services → OAuth consent screen** (Google Auth Platform):
-   - User type **External**, app name "PDF Shelf", your email as support and developer contact.
-   - **Audience → Test users** → add your own Google account. Leave the app in **Testing** — that's fine for personal use.
-4. **Clients → Create client** → type **Web application**.
-   - **Authorized JavaScript origins**: add `http://localhost:5173` and `https://notes.rohanahire.com`.
-   - No redirect URIs needed.
-5. Copy the **Client ID** (ends in `.apps.googleusercontent.com`).
+## How it works
 
-When you first sign in Google will say the app isn't verified — click **Continue**; it's your own app.
+- Notes are plain files in a folder. Subfolders show up as folders in the sidebar.
+- Stars, tags, type and importance are kept in `.shelf.json` in that folder.
+- "Move to trash" moves a file to `.trash/` in that folder.
+- `server/server.mjs` (Node, no dependencies) serves the built app from `dist/`, the API under `/api` and the files under `/raw`. It has no login of its own and listens on `127.0.0.1`.
+- The frontend is React and TypeScript, built with Vite. PDFs render with pdf.js, one page at a time as they come near the screen. Markdown goes through marked and DOMPurify, and HTML notes run in a sandboxed iframe.
 
-## Run locally
+## Run it locally
 
 ```bash
 npm install
-npm run dev
 ```
 
-Open <http://localhost:5173>, paste the Client ID once, sign in, pick or create your notes folder.
+```bash
+npm run build
+```
 
-## Hosting
+```bash
+NOTES_DIR=/tmp/notes node server/server.mjs
+```
 
-Live at <https://notes.rohanahire.com> (GitHub Pages, served from the `gh-pages` branch).
-
-- **DNS (one time):** at your domain provider add a `CNAME` record: name `notes`, value `rohan-ahire1.github.io`.
-- **Deploy a new version:** `npm run deploy` (builds and pushes `dist/` to `gh-pages`).
-- **Optional:** put `VITE_GOOGLE_CLIENT_ID=...` in `.env.local` before deploying so you don't have to paste it in each browser. (A Client ID is not a secret.)
-
-## Notes
-
-- Sign-in lasts about an hour per tab; after that it asks you to sign in again.
-- The app asks for full Drive access because it needs to read PDFs you made outside the app. It only ever lists the folder you pick.
-- Tags, type and importance are tied to this app's Client ID. If you make a new Client ID later, those labels won't carry over (stars will).
+Open <http://127.0.0.1:8798>. Drag files onto the page or use "Add files".
